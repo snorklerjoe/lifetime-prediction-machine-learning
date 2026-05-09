@@ -1,3 +1,11 @@
+
+# Don't clone the data... that'd be kind of silly
+data/
+*.zip
+
+
+
+# GITHUB DEFAULT PYTHON GITIGNORE TEMPLATE
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
