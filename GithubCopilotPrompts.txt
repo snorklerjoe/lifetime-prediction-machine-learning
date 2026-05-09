@@ -1,0 +1,15 @@
+These are some prompts I have used with GitHub Copilot to assist in this project, since it is a course project, to document and disclose my usage of AI tools:
+
+
+Can you write code that throws this data into a handy-dandy pandas dataframe with sensible columns? Also, please desrcibe the structure of this data very carefully, or write code to assist with that. But I think it will help me if we make it tabular.  :)
+
+
+I want to be able to extract the following features -- `Esw = integral of Vce(t)*Ic(t)`, `Rth = (Tinternal - Tpackage) / Pdiss`, and `\Delta V_{th} = Vth(t) - Vth(0)`. Can these features be extracted from this data or is more data needed?
+
+Can we extract Vt from when the transistor turns on in each cycle of transient data?
+Please create a function to extract Vt from the transient data (use cubic interpolation if needed), as well as extracting Rth from thermal sequence data, and extracting Esw from the transient data. These should just be added as additional columns in the dataframe.
+Then, in a separate function, please downsample all data (including these extracted features) to 1Hz and put everything in one dataframe. Save this processed dataframe to a csv file saved in `processed-data/`.
+Then, in a separate function, plot the extracted features over time after loading from the saved file.
+Ask if you have any questions about how this should all be done.
+
+
