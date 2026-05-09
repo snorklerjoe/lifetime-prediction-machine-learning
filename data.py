@@ -24,14 +24,7 @@ from scipy.integrate import trapezoid
 
 pd: Any = importlib.import_module("pandas")
 
-
-DEFAULT_FILENAME = Path(
-	"/home/joseph/Documents/Academic/2026_Fall/ml/paper_project/lifetime-prediction-machine-learning/"
-	"data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/"
-	"Thermal Overstress Aging with Square Signal at gate and SMU data/"
-	"Aging Data/Device 2/Device2  1.mat"
-)
-
+DEFAULT_FILENAME = "data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/Thermal Overstress Aging with Square Signal at gate and SMU data/Aging Data/Device 5/Device5  1.mat"
 
 def load_raw_mat(filename: str | Path = DEFAULT_FILENAME) -> dict[str, Any]:
 	"""Load the raw MATLAB file with SciPy."""
@@ -426,16 +419,33 @@ def create_processed_dataframe(
 
 	aligned_df["Rth"] = rth_values
 	
+	# Unbox scalar arrays for columns we want to keep in the CSV
+	for col in ["time_domain_internalTemperature", "time_domain_packageTemperature", "time_domain_supplyVoltage", "time_domain_collectorEmitterCurrent"]:
+		if col in aligned_df.columns:
+			aligned_df[col] = aligned_df[col].apply(lambda x: float(x.flat[0]) if hasattr(x, 'flat') and x.size > 0 else (float(x) if isinstance(x, (float, int)) else np.nan))
+
 	# Calculate Remaining Useful Life (RUL)
-	failure_records = steady_state_df[steady_state_df["time_domain_packageTemperature"] >= 330]
+	failure_records = aligned_df[aligned_df["time_domain_packageTemperature"] >= 330]
 	if len(failure_records) > 0:
 		failure_time = failure_records.iloc[0]["timeEpoch"]
 	else:
-		failure_time = steady_state_df["timeEpoch"].max()
+		temps = aligned_df["time_domain_packageTemperature"]
+		max_idx = temps.idxmax()
+		if pd.notna(max_idx) and max_idx < temps.index[-1]:
+			min_temp_after_max = temps.loc[max_idx:].min()
+			if min_temp_after_max < 225.0:
+				failure_time = aligned_df.loc[max_idx, "timeEpoch"]
+			else:
+				failure_time = aligned_df["timeEpoch"].max()
+		else:
+			failure_time = aligned_df["timeEpoch"].max()
 
 	aligned_df["RUL"] = failure_time - aligned_df["timeEpoch"]
 	# if negative, clip to 0 since it implies it's already failed
 	aligned_df.loc[aligned_df["RUL"] < 0, "RUL"] = 0.0
+
+	# Truncate exported data to not include data after the failure time.
+	aligned_df = aligned_df[aligned_df["timeEpoch"] <= failure_time].copy()
 
 	return aligned_df
 
@@ -479,8 +489,20 @@ def downsample_to_1hz(
 		print(f"Resampling failed: {e}. Returning original data.")
 		return df.reset_index(drop=True)
 	
-	# Forward-fill gaps to maintain the 1Hz frequency instead of dropping empty seconds
-	resampled = resampled.ffill()
+	# Use cubic interpolation/extrapolation for numeric columns, fallback to linear, then ffill/bfill
+	numeric_cols = resampled.select_dtypes(include=[np.number]).columns
+	non_numeric_cols = resampled.select_dtypes(exclude=[np.number]).columns
+	
+	if len(numeric_cols) > 0:
+		try:
+			resampled[numeric_cols] = resampled[numeric_cols].interpolate(method='cubic')
+		except Exception as e:
+			print(f"Cubic interpolation failed: {e}. Falling back to linear.")
+			resampled[numeric_cols] = resampled[numeric_cols].interpolate(method='linear')
+		resampled[numeric_cols] = resampled[numeric_cols].ffill().bfill()
+	
+	if len(non_numeric_cols) > 0:
+		resampled[non_numeric_cols] = resampled[non_numeric_cols].ffill().bfill()
 	
 	resampled = resampled.reset_index()
 	
@@ -494,7 +516,8 @@ def downsample_to_1hz(
 def save_processed_data(
 	filename: str | Path = DEFAULT_FILENAME,
 	output_dir: str | Path = "processed-data",
-) -> tuple[Path, Path]:
+	output_filename: str | Path = "processed_data.csv",
+) -> Path:
 	"""Extract, process, downsample, and save the data.
 	
 	Returns the path to the saved CSV file and the raw pre-downsampled CSV file.
@@ -523,17 +546,17 @@ def save_processed_data(
 
 	# Save to CSV (handle non-serializable columns by dropping them)
 	df_export = _clean_non_serializable(df_1hz)
-	output_path = output_dir / "processed_data.csv"
+	output_path = output_dir / output_filename
 	df_export.to_csv(output_path, index=False)
 	
 	# Save raw (pre-downsampled) CSV
-	df_export_raw = _clean_non_serializable(df)
-	raw_output_path = output_dir / "processed_data_raw.csv"
-	df_export_raw.to_csv(raw_output_path, index=False)
+	# df_export_raw = _clean_non_serializable(df)
+	# raw_output_path = output_dir / (output_filename + "_raw.csv")
+	# df_export_raw.to_csv(raw_output_path, index=False)
 
-	print(f"Saved processed data to {output_path} and raw to {raw_output_path}")
+	print(f"Saved processed data to {output_path}")
 	
-	return output_path, raw_output_path
+	return output_path
 
 
 def plot_extracted_features(
@@ -560,7 +583,7 @@ def plot_extracted_features(
 	df = pd.read_csv(csv_path)
 	
 	# Create a figure with subplots for each feature
-	fig, axes = plt.subplots(4, 1, figsize=(12, 12))
+	fig, axes = plt.subplots(5, 1, figsize=(12, 15))
 	
 	# Convert timeEpoch to numeric if it happens to be string
 	df["timeEpoch"] = pd.to_numeric(df["timeEpoch"], errors='coerce')
@@ -595,16 +618,26 @@ def plot_extracted_features(
 		axes[2].grid(True, alpha=0.3)
 		axes[2].legend()
 
-	# Plot RUL
-	if "RUL" in df.columns:
-		axes[3].plot(time_axis, df["RUL"], "m-", marker="None", label="RUL")
-		axes[3].set_ylabel("RUL (s)")
-		axes[3].set_xlabel("Time (s)")
-		axes[3].set_title("Remaining Useful Life over Time")
+	# Plot Package Temperature
+	if "time_domain_packageTemperature" in df.columns:
+		axes[3].plot(time_axis, df["time_domain_packageTemperature"], "c-", label="Package Temp")
+		failure_time = time_axis.iloc[-1] if not time_axis.empty else 0
+		axes[3].axvline(x=failure_time, color="r", linestyle="--", label="End of Test (Failure)")
+		axes[3].set_ylabel("Temp (°C)")
+		axes[3].set_title("Package Temperature over Time")
 		axes[3].grid(True, alpha=0.3)
 		axes[3].legend()
+
+	# Plot RUL
+	if "RUL" in df.columns:
+		axes[4].plot(time_axis, df["RUL"], "m-", marker="None", label="RUL")
+		axes[4].set_ylabel("RUL (s)")
+		axes[4].set_xlabel("Time (s)")
+		axes[4].set_title("Remaining Useful Life over Time")
+		axes[4].grid(True, alpha=0.3)
+		axes[4].legend()
 	else:
-		axes[3].set_xlabel("Time (s)")
+		axes[4].set_xlabel("Time (s)")
 	
 	plt.tight_layout()
 	output_path = Path(csv_path).parent / "features_plot.png"
@@ -714,21 +747,37 @@ def plot_transfer_curve(
 
 
 if __name__ == "__main__":
-	# Run the full pipeline
-	data = load_raw_mat(DEFAULT_FILENAME)
-	frames = load_measurement_frames(DEFAULT_FILENAME)
-	structure_summary = describe_measurement_structure(DEFAULT_FILENAME)
+
+	# Process data for all filenames in the following list:
+	files = [
+		"data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/Thermal Overstress Aging with Square Signal at gate and SMU data/Aging Data/Device 2/Device2  1.mat",
+		"data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/Thermal Overstress Aging with Square Signal at gate and SMU data/Aging Data/Device 3/Device3  1.mat",
+		"data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/Thermal Overstress Aging with Square Signal at gate and SMU data/Aging Data/Device 4/Device4  1.mat",
+		"data/8. IGBT Accelerated Aging/IGBTAgingData_04022009/Data/Thermal Overstress Aging with Square Signal at gate and SMU data/Aging Data/Device 5/Device5  1.mat",
+	]
+
+	devind = 1
+	for file in files:
+		devind += 1
+		print(f"Processing file: {file}")
+		downsampled_csv_path = save_processed_data(file, output_dir="processed-data", output_filename=f"device_{devind}_processed.csv")
+		# plot_extracted_features(downsampled_csv_path)
+		# plot_transfer_curve(file)
+	# # Run the full pipeline
+	# data = load_raw_mat(DEFAULT_FILENAME)
+	# frames = load_measurement_frames(DEFAULT_FILENAME)
+	# structure_summary = describe_measurement_structure(DEFAULT_FILENAME)
 	
-	print("Data structure summary:")
-	print(structure_summary)
+	# print("Data structure summary:")
+	# print(structure_summary)
 	
-	# Process and save
-	downsampled_csv_path, raw_csv_path = save_processed_data(DEFAULT_FILENAME)
+	# # Process and save
+	# downsampled_csv_path, raw_csv_path = save_processed_data(DEFAULT_FILENAME)
 	
-	# Plot features
-	plot_extracted_features(downsampled_csv_path, raw_csv_path)
+	# # Plot features
+	# plot_extracted_features(downsampled_csv_path, raw_csv_path)
 	
-	# Plot transfer curve
-	plot_transfer_curve(DEFAULT_FILENAME)
+	# # Plot transfer curve
+	# plot_transfer_curve(DEFAULT_FILENAME)
 
 
