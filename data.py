@@ -206,96 +206,94 @@ def extract_esw_from_transient(transient_df: Any) -> np.ndarray:
 	
 	return np.array(esw_values)
 
-
 def extract_vt_from_transient(transient_df: Any, vt_ic_threshold: float = 1.0) -> np.ndarray:
-	"""Extract threshold voltage Vt from turn-on transient using cubic interpolation.
-	
-	Extracts Vt as the gate-emitter voltage (V_GE) at the moment the collector 
-	current (I_C) reaches `vt_ic_threshold` (default 1A).
-	
-	Returns:
-		Array of Vt estimates, one per transient record.
-	"""
-	from scipy.interpolate import CubicSpline
-	
-	vt_values = []
-	
-	for idx, row in transient_df.iterrows():
-		# Get waveforms
-		v_gate_signal = row.get("time_domain_gateSignalVoltage")
-		v_ge = row.get("time_domain_gateEmitterVoltage")
-		ic = row.get("time_domain_collectorEmitterCurrentSignal")
-		
-		if v_gate_signal is None or v_ge is None or ic is None:
-			vt_values.append(np.nan)
-			continue
-		
-		v_gate_signal = np.asarray(v_gate_signal).flatten()
-		v_ge = np.asarray(v_ge).flatten()
-		ic = np.asarray(ic).flatten()
-		
-		min_len = min(len(v_gate_signal), len(v_ge), len(ic))
-		if min_len < 10:  # Need enough points for interpolation
-			vt_values.append(np.nan)
-			continue
-		
-		v_gate_signal = v_gate_signal[:min_len]
-		v_ge = v_ge[:min_len]
-		ic = ic[:min_len]
-		
-		# Find the edge (rising portion)
-		gate_diff = np.diff(v_gate_signal)
-		rising_idx = np.where(gate_diff > np.max(gate_diff) * 0.1)[0]
-		
-		if len(rising_idx) < 2:
-			vt_values.append(np.nan)
-			continue
-		
-		# Get a window around the rise
-		start_idx = max(0, rising_idx[0] - 10)
-		end_idx = min(len(v_ge), rising_idx[-1] + 40)
-		
-		try:
-			# Use cubic spline to interpolate
-			x = np.arange(end_idx - start_idx)
-			vge_win = v_ge[start_idx:end_idx]
-			ic_win = ic[start_idx:end_idx]
-			
-			cs_vge = CubicSpline(x, vge_win)
-			cs_ic = CubicSpline(x, ic_win)
-			
-			# Evaluate on denser grid
-			x_dense = np.linspace(0, len(x) - 1, len(x) * 50)
-			vge_dense = cs_vge(x_dense)
-			ic_dense = cs_ic(x_dense)
-			
-			# Find where Ic crosses the threshold and maintains positive slope
-			# Look for the first index where Ic >= vt_ic_threshold (1.0A)
-			# and the surrounding points (e.g. +/- 10 dense points) are monotonically increasing.
-			cross_idx = np.where(ic_dense >= vt_ic_threshold)[0]
-			vt = np.nan
-			for idx in cross_idx:
-				if idx < 15 or idx >= len(ic_dense) - 15:
-					continue
-				
-				# Check if the surrounding points have a positive slope.
-				# A spline might have tiny ripples, so we check that the general 
-				# trend over the next/prev points is strongly positive.
-				window_diffs = np.diff(ic_dense[idx-10:idx+10])
-				if np.all(window_diffs >= -1e-4) and (ic_dense[idx+5] > ic_dense[idx-5]):
-					vt = vge_dense[idx]
-					break
-					
-			if np.isnan(vt) and len(cross_idx) > 0:
-				# Fallback just in case we didn't meet the strict monotonicity
-				vt = vge_dense[cross_idx[0]]
-		except Exception:
-			vt = np.nan
-		
-		vt_values.append(vt)
-	
-	return np.array(vt_values)
+    """Extract threshold voltage Vt from turn-on transient using cubic interpolation.
+    
+    Extracts Vt as the gate-emitter voltage (V_GE) at the moment the collector 
+    current (I_C) reaches `vt_ic_threshold` (default 1A).
+    
+    Returns:
+        Array of Vt estimates, one per transient record.
+    """
+    from scipy.interpolate import CubicSpline
+    
+    VGE_SATURATION_LIMIT = 8.0  # Vth should be well below drive voltage
+    VGE_MIN = 3.0               # Vth for IGBTs typically 4-8V
+    VGE_MAX = 9.0
+    
+    vt_values = []
+    
+    for _, row in transient_df.iterrows():
+        v_gate_signal = row.get("time_domain_gateSignalVoltage")
+        v_ge = row.get("time_domain_gateEmitterVoltage")
+        ic = row.get("time_domain_collectorEmitterCurrentSignal")
+        
+        if v_gate_signal is None or v_ge is None or ic is None:
+            vt_values.append(np.nan)
+            continue
+        
+        v_gate_signal = np.asarray(v_gate_signal).flatten()
+        v_ge = np.asarray(v_ge).flatten()
+        ic = np.asarray(ic).flatten()
+        
+        min_len = min(len(v_gate_signal), len(v_ge), len(ic))
+        if min_len < 10:
+            vt_values.append(np.nan)
+            continue
+        
+        v_gate_signal = v_gate_signal[:min_len]
+        v_ge = v_ge[:min_len]
+        ic = ic[:min_len]
+        
+        # Find the rising edge of the gate signal
+        gate_diff = np.diff(v_gate_signal)
+        rising_idx = np.where(gate_diff > np.percentile(gate_diff, 95))[0]
+        
+        if len(rising_idx) < 2:
+            vt_values.append(np.nan)
+            continue
+        
+        # Window around the rise
+        start_idx = max(0, rising_idx[0] - 10)
+        end_idx = min(min_len, rising_idx[-1] + 40)
+        
+        if end_idx - start_idx < 10:
+            vt_values.append(np.nan)
+            continue
 
+        try:
+            x = np.arange(end_idx - start_idx)
+            vge_win = v_ge[start_idx:end_idx]
+            ic_win = ic[start_idx:end_idx]
+            
+            cs_vge = CubicSpline(x, vge_win)
+            cs_ic = CubicSpline(x, ic_win)
+            
+            x_dense = np.linspace(0, len(x) - 1, len(x) * 50)
+            vge_dense = cs_vge(x_dense)
+            ic_dense = cs_ic(x_dense)
+            
+            # Find first Ic crossing below Vge saturation
+            cross_idx = np.where(ic_dense >= vt_ic_threshold)[0]
+            vt = np.nan
+            for i in cross_idx:
+                if i < 5 or i >= len(ic_dense) - 5:
+                    continue
+                if vge_dense[i] > VGE_SATURATION_LIMIT:
+                    continue
+                vt = vge_dense[i]
+                break
+            
+            # Sanity check on physical range
+            if not np.isnan(vt) and not (VGE_MIN < vt < VGE_MAX):
+                vt = np.nan
+
+        except Exception:
+            vt = np.nan
+        
+        vt_values.append(vt)
+    
+    return np.array(vt_values)
 
 def extract_rth_from_steady_state(steady_state_df: Any) -> np.ndarray:
 	"""Extract thermal resistance Rth = (T_internal - T_package) / P_diss.
@@ -700,14 +698,14 @@ def plot_transfer_curve(
 	vge_window = v_ge[start_idx:end_idx]
 	ic_window = ic[start_idx:end_idx]
 	
-# Extract Vth where Ic crosses 1A and maintains positive slope
+# Extract Vth where Ic crosses 1.5A and maintains positive slope
 	cs_vge = CubicSpline(x, vge_window)
 	cs_ic = CubicSpline(x, ic_window)
 	x_dense = np.linspace(0, len(x) - 1, len(x) * 50)
 	vge_dense = cs_vge(x_dense)
 	ic_dense = cs_ic(x_dense)
 
-	cross_idx = np.where(ic_dense >= 1.0)[0]
+	cross_idx = np.where(ic_dense >= 1.5)[0]
 	vt = np.nan
 	for idx in cross_idx:
 		if idx < 15 or idx >= len(ic_dense) - 15:
